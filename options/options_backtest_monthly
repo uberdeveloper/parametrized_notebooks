@@ -1,0 +1,343 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 223,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import pandas as pd\n",
+    "import numpy as np\n",
+    "from typing import List, Tuple"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 224,
+   "metadata": {
+    "tags": [
+     "parameters"
+    ]
+   },
+   "outputs": [],
+   "source": [
+    "#### Parameters\n",
+    "spot_filename:str = \"/tmp/index.csv\"\n",
+    "options_filename:str = \"../../data/nifty_options_eod.h5\"\n",
+    "output_filename:str = 'output.csv' # Friendly name for output\n",
+    "step:int = 100\n",
+    "options:Tuple[Tuple[str, float]] = (\n",
+    "    ('p', 0),\n",
+    "    ('p', 0.01),\n",
+    "    ('p', 0.02),\n",
+    "    ('c', 0.0),\n",
+    "    ('c', 0.01),\n",
+    "    ('c', 0.02)\n",
+    ")\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 225,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "index = pd.read_csv(spot_filename, parse_dates=['date'])\n",
+    "opt = pd.read_hdf(options_filename).sort_values(by=['date'])\n",
+    "rename = {\n",
+    "    'open_price': 'open',\n",
+    "    'high_price': 'high',\n",
+    "    'low_price': 'low',\n",
+    "    'close_pric': 'close'\n",
+    "}\n",
+    "opt = opt.rename(columns=rename)\n",
+    "opt = opt[(opt.date.dt.year == opt.expiry_date.dt.year) &\\\n",
+    "    (opt.date.dt.month == opt.expiry_date.dt.month)].sort_values(by='date')\n",
+    "opt['de'] = (opt['expiry_date'] - opt['date']).dt.days\n",
+    "opt['year'] = opt.date.dt.year\n",
+    "opt['month'] = opt.date.dt.month\n",
+    "opt['strike_pr'] = opt.contract_d.str[24:].astype(int)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 226,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "expiry_dates = opt.groupby(['year', 'month']).expiry_date.max().reset_index()\n",
+    "opt2 = opt[opt.expiry_date.isin(expiry_dates.expiry_date.values)]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 130,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "ce = opt2.query(\"opt_type=='CE'\")\n",
+    "pe = opt2.query(\"opt_type=='PE'\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 227,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def get_result(options_data, spot_data, opt='p', itm=0, step=100):\n",
+    "    if opt.lower() == 'p':\n",
+    "        m = 1-itm\n",
+    "    else:\n",
+    "        m = 1+itm\n",
+    "        \n",
+    "    first_dates = options_data.groupby(['year', 'month']).date.min().reset_index()\n",
+    "    opts = options_data.merge(first_dates, on=['year', 'month', 'date'])\n",
+    "    opts['spot'] = opts.undrlng_st.copy()\n",
+    "    opts['strike'] = [int((x*m)/step)*step for x in opts.undrlng_st.values]\n",
+    "    if opt.lower() == 'p':\n",
+    "        opts['strike'] = opts['strike'] + step\n",
+    "    opts = opts.query('strike==strike_pr')\n",
+    "    cols = ['date', 'contract_d', 'strike', 'expiry_date']\n",
+    "    entries = opts[cols].copy().drop_duplicates()\n",
+    "    entries['entry_date'] = entries.date.copy()\n",
+    "    \n",
+    "    last_dates = options_data.groupby(['year', 'month']).date.max().reset_index()\n",
+    "    exits = entries.copy()\n",
+    "    del exits['entry_date']\n",
+    "    exits['date'] = last_dates.date.values\n",
+    "    exits['exit_date'] = exits.date.copy()\n",
+    "\n",
+    "    frame1 = entries.merge(options_data, on=cols)\n",
+    "    frame2 = exits.merge(options_data, on=cols)\n",
+    "    trades = frame1.merge(frame2, on=['contract_d', 'expiry_date'])\n",
+    "    rename = { \n",
+    "        'date_x': 'date',\n",
+    "        'close_x': 'entry_price',\n",
+    "        'undrlng_st_x': 'entry_spot',\n",
+    "        'close_y': 'exit_price',\n",
+    "        'undrlng_st_y': 'exit_spot'\n",
+    "    }\n",
+    "    trades = trades.rename(columns=rename)\n",
+    "    cols = ['date', 'contract_d', 'expiry_date', 'entry_date', 'entry_price',\n",
+    "           'exit_date', 'exit_price', 'entry_spot', 'exit_spot']\n",
+    "    trades['pnl'] = trades.eval('exit_price-entry_price')\n",
+    "    trades['de'] = (trades['expiry_date'] - trades['entry_date']).dt.days\n",
+    "    return trades[cols + ['pnl', 'de']]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 230,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "count     396.00000\n",
+       "mean       11.87298\n",
+       "std       317.46530\n",
+       "min      -571.50000\n",
+       "25%      -149.93750\n",
+       "50%       -83.72500\n",
+       "75%        90.66250\n",
+       "max      2271.30000\n",
+       "Name: pnl, dtype: float64"
+      ]
+     },
+     "execution_count": 230,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "collect = []\n",
+    "for i,(opt,strike) in enumerate(options):\n",
+    "    data = ce if opt =='c' else pe\n",
+    "    temp = get_result(data, index, itm=strike,step=step, opt=opt)\n",
+    "    temp['name'] = f\"opt{i}\"\n",
+    "    collect.append(temp)\n",
+    "res = pd.concat(collect)\n",
+    "del collect\n",
+    "res.pnl.describe()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 233,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>count</th>\n",
+       "      <th>mean</th>\n",
+       "      <th>std</th>\n",
+       "      <th>min</th>\n",
+       "      <th>25%</th>\n",
+       "      <th>50%</th>\n",
+       "      <th>75%</th>\n",
+       "      <th>max</th>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>name</th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>opt0</th>\n",
+       "      <td>66.0</td>\n",
+       "      <td>-26.807576</td>\n",
+       "      <td>376.276608</td>\n",
+       "      <td>-571.50</td>\n",
+       "      <td>-172.3875</td>\n",
+       "      <td>-126.10</td>\n",
+       "      <td>25.5250</td>\n",
+       "      <td>2271.30</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>opt1</th>\n",
+       "      <td>66.0</td>\n",
+       "      <td>-28.750000</td>\n",
+       "      <td>347.823329</td>\n",
+       "      <td>-529.05</td>\n",
+       "      <td>-134.8000</td>\n",
+       "      <td>-107.30</td>\n",
+       "      <td>-32.9375</td>\n",
+       "      <td>2213.45</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>opt2</th>\n",
+       "      <td>66.0</td>\n",
+       "      <td>-26.088636</td>\n",
+       "      <td>320.109340</td>\n",
+       "      <td>-488.70</td>\n",
+       "      <td>-115.6000</td>\n",
+       "      <td>-84.45</td>\n",
+       "      <td>-57.7125</td>\n",
+       "      <td>2138.75</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>opt3</th>\n",
+       "      <td>66.0</td>\n",
+       "      <td>50.658333</td>\n",
+       "      <td>318.721654</td>\n",
+       "      <td>-423.90</td>\n",
+       "      <td>-181.8125</td>\n",
+       "      <td>-62.70</td>\n",
+       "      <td>264.2250</td>\n",
+       "      <td>1083.70</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>opt4</th>\n",
+       "      <td>66.0</td>\n",
+       "      <td>53.161364</td>\n",
+       "      <td>279.171050</td>\n",
+       "      <td>-319.60</td>\n",
+       "      <td>-120.8500</td>\n",
+       "      <td>-65.05</td>\n",
+       "      <td>225.1125</td>\n",
+       "      <td>1037.15</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>opt5</th>\n",
+       "      <td>66.0</td>\n",
+       "      <td>49.064394</td>\n",
+       "      <td>242.036904</td>\n",
+       "      <td>-271.50</td>\n",
+       "      <td>-84.2750</td>\n",
+       "      <td>-56.45</td>\n",
+       "      <td>182.9125</td>\n",
+       "      <td>991.45</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "      count       mean         std     min       25%     50%       75%  \\\n",
+       "name                                                                     \n",
+       "opt0   66.0 -26.807576  376.276608 -571.50 -172.3875 -126.10   25.5250   \n",
+       "opt1   66.0 -28.750000  347.823329 -529.05 -134.8000 -107.30  -32.9375   \n",
+       "opt2   66.0 -26.088636  320.109340 -488.70 -115.6000  -84.45  -57.7125   \n",
+       "opt3   66.0  50.658333  318.721654 -423.90 -181.8125  -62.70  264.2250   \n",
+       "opt4   66.0  53.161364  279.171050 -319.60 -120.8500  -65.05  225.1125   \n",
+       "opt5   66.0  49.064394  242.036904 -271.50  -84.2750  -56.45  182.9125   \n",
+       "\n",
+       "          max  \n",
+       "name           \n",
+       "opt0  2271.30  \n",
+       "opt1  2213.45  \n",
+       "opt2  2138.75  \n",
+       "opt3  1083.70  \n",
+       "opt4  1037.15  \n",
+       "opt5   991.45  "
+      ]
+     },
+     "execution_count": 233,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "res.set_index('date').groupby('name').pnl.describe()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 26,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "res.to_csv(output_filename)"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.7.3"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
